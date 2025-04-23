@@ -23,7 +23,8 @@ app.use(cookieParser());
 
 // CORS configuration for production and development environments
 const allowedOrigins = [
-  process.env.CLIENT_URL || "https://lms-mernstack.vercel.app",
+  process.env.CLIENT_URL || "https://examly-frontend.vercel.app",
+  "https://examly-frontend.vercel.app",
   "http://localhost:5173",
 ];
 
@@ -52,6 +53,15 @@ app.use("/api/v1/purchase", purchaseRoute);
 app.use("/api/v1/progress", courseProgressRoute);
 app.use("/api/v1/tests", testRoute);
 app.use("/api", cheatingAttemptRoute);
+
+// Add a root route handler
+app.get("/", (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: "Welcome to Examly API",
+    version: "1.0.0",
+  });
+});
 
 // Error handler middleware
 app.use((err, req, res, next) => {
