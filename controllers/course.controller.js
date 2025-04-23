@@ -126,8 +126,8 @@ export const editCourse = async (req, res) => {
       courseLevel,
       coursePrice,
       isFree,
+      courseThumbnailUrl,
     } = req.body;
-    const thumbnail = req.file;
 
     let course = await Course.findById(courseId);
     if (!course) {
@@ -135,14 +135,10 @@ export const editCourse = async (req, res) => {
         message: "Course not found!",
       });
     }
-    let courseThumbnail;
-    if (thumbnail) {
-      if (course.courseThumbnail) {
-        const publicId = course.courseThumbnail.split("/").pop().split(".")[0];
-        await deleteMediaFromCloudinary(publicId); // delete old image
-      }
-      // upload a thumbnail on clourdinary
-      courseThumbnail = await uploadMedia(thumbnail.path);
+
+    if (courseThumbnailUrl && course.courseThumbnail) {
+      const publicId = course.courseThumbnail.split("/").pop().split(".")[0];
+      await deleteMediaFromCloudinary(publicId); // delete old image
     }
 
     const updateData = {
@@ -152,9 +148,12 @@ export const editCourse = async (req, res) => {
       category,
       courseLevel,
       coursePrice,
-      courseThumbnail: courseThumbnail?.secure_url,
       isFree: isFree === "true",
     };
+
+    if (courseThumbnailUrl) {
+      updateData.courseThumbnail = courseThumbnailUrl;
+    }
 
     course = await Course.findByIdAndUpdate(courseId, updateData, {
       new: true,
@@ -167,7 +166,7 @@ export const editCourse = async (req, res) => {
   } catch (error) {
     console.log(error);
     return res.status(500).json({
-      message: "Failed to create course",
+      message: "Failed to update course",
     });
   }
 };
