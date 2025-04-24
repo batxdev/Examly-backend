@@ -1,184 +1,261 @@
-import Stripe from "stripe";
+import { CourseProgress } from "../models/courseProgress.js";
 import { Course } from "../models/course.model.js";
-import { CoursePurchase } from "../models/coursePurchase.model.js";
-import { Lecture } from "../models/lecture.model.js";
-import { User } from "../models/user.model.js";
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-
-export const createCheckoutSession = async (req, res) => {
-  try {
-    const userId = req.id;
-    const { courseId } = req.body;
-
-    const course = await Course.findById(courseId);
-    if (!course) return res.status(404).json({ message: "Course not found!" });
-
-    // Create a new course purchase record
-    const newPurchase = new CoursePurchase({
-      courseId,
-      userId,
-      amount: course.coursePrice,
-      status: "pending",
-    });
-
-    // Create a Stripe checkout session
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ["card"],
-      line_items: [
-        {
-          price_data: {
-            currency: "inr",
-            product_data: {
-              name: course.courseTitle,
-              description: course.subTitle || "",
-              images: [course.courseThumbnail || ""],
-            },
-            unit_amount: course.coursePrice * 100, // Amount in paise (lowest denomination)
-          },
-          quantity: 1,
-        },
-      ],
-      mode: "payment",
-      success_url: `${process.env.FRONTEND_URL}/course-progress/${courseId}`, // once payment successful redirect to course progress page
-      cancel_url: `${process.env.FRONTEND_URL}/course-detail/${courseId}`,
-      client_reference_id: courseId,
-      customer_email: req.user.email,
-      metadata: {
-        courseId,
-        userId: userId,
-      },
-      shipping_address_collection: {
-        allowed_countries: ["IN"], // Optionally restrict allowed countries
-      },
-    });
-
-    if (!session.url) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Error while creating session" });
-    }
-
-    // Save the purchase record
-    newPurchase.paymentId = session.id;
-    await newPurchase.save();
-
-    return res.status(200).json({
-      success: true,
-      url: session.url, // Return the Stripe checkout URL
-    });
-  } catch (error) {
-    console.log(error);
-  }
-};
-
-export const stripeWebhook = async (req, res) => {
-  let event;
-
-  try {
-    const payloadString = JSON.stringify(req.body, null, 2);
-    const secret = process.env.WEBHOOK_ENDPOINT_SECRET;
-
-    const header = stripe.webhooks.generateTestHeaderString({
-      payload: payloadString,
-      secret,
-    });
-
-    event = stripe.webhooks.constructEvent(payloadString, header, secret);
-  } catch (error) {
-    console.error("Webhook error:", error.message);
-    return res.status(400).send(`Webhook error: ${error.message}`);
-  }
-
-  // Handle the checkout session completed event
-  if (event.type === "checkout.session.completed") {
-    console.log("check session complete is called");
-
-    try {
-      const session = event.data.object;
-
-      const purchase = await CoursePurchase.findOne({
-        paymentId: session.id,
-      }).populate({ path: "courseId" });
-
-      if (!purchase) {
-        return res.status(404).json({ message: "Purchase not found" });
-      }
-
-      if (session.amount_total) {
-        purchase.amount = session.amount_total / 100;
-      }
-      purchase.status = "completed";
-
-      // Make all lectures visible by setting `isPreviewFree` to true
-      if (purchase.courseId && purchase.courseId.lectures.length > 0) {
-        await Lecture.updateMany(
-          { _id: { $in: purchase.courseId.lectures } },
-          { $set: { isPreviewFree: true } }
-        );
-      }
-
-      await purchase.save();
-
-      // Update user's enrolledCourses
-      await User.findByIdAndUpdate(
-        purchase.userId,
-        { $addToSet: { enrolledCourses: purchase.courseId._id } }, // Add course ID to enrolledCourses
-        { new: true }
-      );
-
-      // Update course to add user ID to enrolledStudents
-      await Course.findByIdAndUpdate(
-        purchase.courseId._id,
-        { $addToSet: { enrolledStudents: purchase.userId } }, // Add user ID to enrolledStudents
-        { new: true }
-      );
-    } catch (error) {
-      console.error("Error handling event:", error);
-      return res.status(500).json({ message: "Internal Server Error" });
-    }
-  }
-  res.status(200).send();
-};
-export const getCourseDetailWithPurchaseStatus = async (req, res) => {
+export const getCourseProgress = async (req, res) => {
   try {
     const { courseId } = req.params;
     const userId = req.id;
 
-    const course = await Course.findById(courseId)
-      .populate({ path: "creator" })
-      .populate({ path: "lectures" });
+    // step-1 fetch the user course progress
+    let courseProgress = await CourseProgress.findOne({
+      courseId,
+      userId,
+    }).populate("courseId");
 
-    const purchased = await CoursePurchase.findOne({ userId, courseId });
-    console.log(purchased);
+    const courseDetails = await Course.findById(courseId).populate("lectures");
 
-    if (!course) {
-      return res.status(404).json({ message: "course not found!" });
+    if (!courseDetails) {
+      return res.status(404).json({
+        message: "Course not found",
+      });
     }
 
+    // Step-2 If no progress found, return course details with an empty progress
+    if (!courseProgress) {
+      return res.status(200).json({
+        data: {
+          courseDetails,
+          progress: [],
+          completed: false,
+        },
+      });
+    }
+
+    // Step-3 Return the user's course progress alog with course details
     return res.status(200).json({
-      course,
-      purchased: !!purchased, // true if purchased, false otherwise
+      data: {
+        courseDetails,
+        progress: courseProgress.lectureProgress,
+        completed: courseProgress.completed,
+      },
     });
   } catch (error) {
     console.log(error);
+    return res.status(500).json({
+      message: "Failed to get course progress",
+      error: error.message,
+    });
   }
 };
 
-export const getAllPurchasedCourse = async (_, res) => {
+export const updateLectureProgress = async (req, res) => {
   try {
-    const purchasedCourse = await CoursePurchase.find({
-      status: "completed",
-    }).populate("courseId");
-    if (!purchasedCourse) {
-      return res.status(404).json({
-        purchasedCourse: [],
+    const { courseId, lectureId } = req.params;
+    const userId = req.id;
+
+    // fetch or create course progress
+    let courseProgress = await CourseProgress.findOne({ courseId, userId });
+
+    if (!courseProgress) {
+      // If no progress exist, create a new record
+      courseProgress = new CourseProgress({
+        userId,
+        courseId,
+        completed: false,
+        lectureProgress: [],
       });
     }
+
+    // find the lecture progress in the course progress
+    const lectureIndex = courseProgress.lectureProgress.findIndex(
+      (lecture) => lecture.lectureId === lectureId
+    );
+
+    if (lectureIndex !== -1) {
+      // if lecture already exist, update its status
+      courseProgress.lectureProgress[lectureIndex].viewed = true;
+    } else {
+      // Add new lecture progress
+      courseProgress.lectureProgress.push({
+        lectureId,
+        viewed: true,
+      });
+    }
+
+    // if all lecture is complete
+    const lectureProgressLength = courseProgress.lectureProgress.filter(
+      (lectureProg) => lectureProg.viewed
+    ).length;
+
+    const course = await Course.findById(courseId);
+
+    if (course.lectures.length === lectureProgressLength)
+      courseProgress.completed = true;
+
+    await courseProgress.save();
+
     return res.status(200).json({
-      purchasedCourse,
+      message: "Lecture progress updated successfully.",
     });
   } catch (error) {
     console.log(error);
+    return res.status(500).json({
+      message: "Failed to update lecture progress",
+      error: error.message,
+    });
+  }
+};
+
+export const markAsCompleted = async (req, res) => {
+  try {
+    const { courseId } = req.params;
+    const userId = req.id;
+
+    const courseProgress = await CourseProgress.findOne({ courseId, userId });
+    if (!courseProgress)
+      return res.status(404).json({ message: "Course progress not found" });
+
+    courseProgress.lectureProgress.map(
+      (lectureProgress) => (lectureProgress.viewed = true)
+    );
+    courseProgress.completed = true;
+    await courseProgress.save();
+    return res.status(200).json({ message: "Course marked as completed." });
+  } catch (error) {
+    console.log(error);
+    return res.status(500).json({
+      message: "Failed to mark course as completed",
+      error: error.message,
+    });
+  }
+};
+
+export const markAsInCompleted = async (req, res) => {
+  try {
+    const { courseId } = req.params;
+    const userId = req.id;
+
+    const courseProgress = await CourseProgress.findOne({ courseId, userId });
+    if (!courseProgress)
+      return res.status(404).json({ message: "Course progress not found" });
+
+    courseProgress.lectureProgress.map(
+      (lectureProgress) => (lectureProgress.viewed = false)
+    );
+    courseProgress.completed = false;
+    await courseProgress.save();
+    return res.status(200).json({ message: "Course marked as incompleted." });
+  } catch (error) {
+    console.log(error);
+    return res.status(500).json({
+      message: "Failed to mark course as incompleted",
+      error: error.message,
+    });
+  }
+};
+
+export const markLectureAsCompleted = async (req, res) => {
+  try {
+    const { courseId, lectureId } = req.params;
+    const userId = req.id;
+
+    // Fetch or create course progress
+    let courseProgress = await CourseProgress.findOne({ courseId, userId });
+
+    if (!courseProgress) {
+      // If no progress exists, create a new record
+      courseProgress = new CourseProgress({
+        userId,
+        courseId,
+        completed: false,
+        lectureProgress: [],
+      });
+    }
+
+    // Find the lecture in the progress
+    const lectureIndex = courseProgress.lectureProgress.findIndex(
+      (lecture) => lecture.lectureId === lectureId
+    );
+
+    if (lectureIndex !== -1) {
+      // If lecture already exists, mark it as viewed
+      courseProgress.lectureProgress[lectureIndex].viewed = true;
+    } else {
+      // Add new lecture progress marked as viewed
+      courseProgress.lectureProgress.push({
+        lectureId,
+        viewed: true,
+      });
+    }
+
+    // Check if all lectures are completed to update the course completion status
+    const lectureProgressLength = courseProgress.lectureProgress.filter(
+      (lectureProg) => lectureProg.viewed
+    ).length;
+
+    const course = await Course.findById(courseId);
+
+    if (course.lectures.length === lectureProgressLength) {
+      courseProgress.completed = true;
+    }
+
+    await courseProgress.save();
+
+    return res.status(200).json({
+      message: "Lecture marked as completed.",
+    });
+  } catch (error) {
+    console.log(error);
+    return res.status(500).json({
+      message: "Failed to mark lecture as completed.",
+      error: error.message,
+    });
+  }
+};
+
+export const markLectureAsIncomplete = async (req, res) => {
+  try {
+    const { courseId, lectureId } = req.params;
+    const userId = req.id;
+
+    // Fetch course progress
+    const courseProgress = await CourseProgress.findOne({ courseId, userId });
+
+    if (!courseProgress) {
+      return res.status(404).json({
+        message: "Course progress not found",
+      });
+    }
+
+    // Find the lecture in the progress
+    const lectureIndex = courseProgress.lectureProgress.findIndex(
+      (lecture) => lecture.lectureId === lectureId
+    );
+
+    if (lectureIndex !== -1) {
+      // If lecture exists, mark it as not viewed
+      courseProgress.lectureProgress[lectureIndex].viewed = false;
+    } else {
+      // If lecture doesn't exist in progress, add it as not viewed
+      courseProgress.lectureProgress.push({
+        lectureId,
+        viewed: false,
+      });
+    }
+
+    // Update course completion status since a lecture is now incomplete
+    courseProgress.completed = false;
+
+    await courseProgress.save();
+
+    return res.status(200).json({
+      message: "Lecture marked as incomplete.",
+    });
+  } catch (error) {
+    console.log(error);
+    return res.status(500).json({
+      message: "Failed to mark lecture as incomplete.",
+      error: error.message,
+    });
   }
 };
