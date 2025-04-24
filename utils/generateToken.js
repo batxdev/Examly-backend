@@ -16,6 +16,7 @@ export const generateToken = (res, user, message) => {
     .json({
       success: true,
       message,
+      token,
       user: {
         _id: user._id,
         name: user.name,
