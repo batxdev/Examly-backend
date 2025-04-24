@@ -371,3 +371,52 @@ export const togglePublishCourse = async (req, res) => {
     });
   }
 };
+
+// New function to return all courses (compatible with updated frontend)
+export const getAllCourses = async (req, res) => {
+  try {
+    // Get filter parameters from query if provided
+    const { category, difficulty, search } = req.query;
+
+    // Create base query object
+    const query = { isPublished: true };
+
+    // Add filters if provided
+    if (category) {
+      query.category = category;
+    }
+
+    if (difficulty) {
+      query.courseLevel = difficulty;
+    }
+
+    if (search) {
+      query.$or = [
+        { courseTitle: { $regex: search, $options: "i" } },
+        { subTitle: { $regex: search, $options: "i" } },
+        { description: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    // Find courses with populated creator
+    const courses = await Course.find(query)
+      .populate({
+        path: "creator",
+        select: "name photoUrl",
+      })
+      .sort({ createdAt: -1 }); // Newest first
+
+    if (!courses || courses.length === 0) {
+      return res.status(200).json([]);
+    }
+
+    // Return array of courses directly (compatible with updated frontend)
+    return res.status(200).json(courses);
+  } catch (error) {
+    console.log(error);
+    return res.status(500).json({
+      message: "Failed to get courses",
+      error: error.message,
+    });
+  }
+};
